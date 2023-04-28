@@ -1,0 +1,159 @@
+Description: Cloud Formation template to deploy AWS resources required for CW2 project - Software Development and Security
+
+Parameters:
+
+  vpcCIDR:
+    Description: CIDR block
+    Type: String
+    Default: 192.168.0.0/24
+
+Resources:
+
+  # VPC
+  MyVPC:
+    Type: AWS::EC2::VPC
+    Properties:
+      CidrBlock: !Ref vpcCIDR
+      Tags:
+        - Key: Name
+          Value: !Sub ${AWS::StackName}-MyVPC
+
+  # Public Subnet
+  PublicSubnet:
+    Type: AWS::EC2::Subnet
+    Properties:
+      AvailabilityZone: eu-west-2a
+      VpcId: !Ref MyVPC
+      CidrBlock: !Ref vpcCIDR
+      Tags:
+        - Key: Name
+          Value: !Sub ${AWS::StackName}-PublicSubnet
+
+  # Security Group for SSH access
+  SSHSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupName: SSHSecurityGroup
+      GroupDescription: Enable SSH/SFTP access via port 22
+      VpcId: !Ref MyVPC
+      SecurityGroupIngress:
+        - IpProtocol: tcp
+          FromPort: 22
+          ToPort: 22
+          CidrIp: 0.0.0.0/0
+      Tags:
+        - Key: Name
+          Value: !Sub ${AWS::StackName}-SSHSecurityGroup
+
+  # Security Group for HTTP access on port 80 and port 8080
+  HTTPSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupName: HTTPSecurityGroup
+      GroupDescription: Enable HTTP access via port 80 and 8080
+      VpcId: !Ref MyVPC
+      SecurityGroupIngress:
+        - IpProtocol: tcp
+          FromPort: 80
+          ToPort: 80
+          CidrIp: 0.0.0.0/0
+        - IpProtocol: tcp
+          FromPort: 8080
+          ToPort: 8080
+          CidrIp: 0.0.0.0/0
+      Tags:
+        - Key: Name
+          Value: !Sub ${AWS::StackName}-HTTPSecurityGroup          
+
+  # Internet Gateway and related attachment to link to VPC
+  InternetGateway:
+    Type: AWS::EC2::InternetGateway
+    Properties:
+      Tags:
+        - Key: Name
+          Value: !Sub ${AWS::StackName}-InternetGateway          
+  InternetGatewayAttachment:
+    Type: AWS::EC2::VPCGatewayAttachment
+    Properties:
+      InternetGatewayId: !Ref InternetGateway
+      VpcId: !Ref MyVPC
+  
+  # Default Public Route, Public Route Table and its assotiation with Public Subnet
+  PublicRouteTable:
+    Type: AWS::EC2::RouteTable
+    Properties:
+      VpcId: !Ref MyVPC
+      Tags:
+        - Key: Name
+          Value: !Sub ${AWS::StackName}-PublicRouteTable       
+
+  DefaultPublicRoute:
+    Type: AWS::EC2::Route
+    DependsOn: InternetGatewayAttachment
+    Properties:
+      RouteTableId: !Ref PublicRouteTable
+      DestinationCidrBlock: 0.0.0.0/0
+      GatewayId: !Ref InternetGateway
+
+  PublicSubnetRouteTableAssociation:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      RouteTableId: !Ref PublicRouteTable
+      SubnetId: !Ref PublicSubnet
+
+  # Information for the main EC2 Instance, dedicated for the Webserver
+  WebServerMaria:
+    Type: AWS::EC2::Instance
+    Properties:
+      ImageId: ami-0d76271a8a1525c1a
+      InstanceType: t2.micro
+      SubnetId: !Ref PublicSubnet 
+      SecurityGroupIds:
+        - !Ref SSHSecurityGroup
+        - !Ref HTTPSecurityGroup
+      
+      # Installing the main packages and dependencies
+      UserData: !Base64 |
+        #!/bin/bash
+        # This script is injected into the AWS VM on creation
+        # and can be used to provision your VM
+        # NB it's run as root, so no need for sudo
+
+        # debug logs are here
+        echo "Starting $(date)"
+        echo "****************************************"
+        echo "* Installing Required Tools and NodeJS *"
+        echo "****************************************"
+
+        # Installing NodeJS
+        curl --silent --location https://rpm.nodesource.com/setup_16.x | bash -
+        sudo yum update -y
+        sudo yum -y install nodejs
+
+        # Installing Git
+        sudo yum install -y git
+
+        echo "Starting $(date)"
+        echo "******************************"
+        echo "* Installing the Application *"
+        echo "******************************"
+
+        # Cloning the project repository from GitHub
+        cd /home/ec2-user
+        git clone https://github.com/vcmeamaria/sds-cw2.git
+
+        # Installing the dependencies via NPM
+        cd /home/ec2-user/sds-cw2/01-notebook
+        npm install
+
+        echo "Starting $(date)"
+        echo "****************************"
+        echo "* Starting the Application *"
+        echo "****************************"
+        DEBUG=* PORT=80 npm start
+
+  # An Elastic IP for the EC2 instance (Webserver)
+  MyEIP:
+    Type: AWS::EC2::EIP
+    Properties:
+      InstanceId: !Ref WebServerMaria
